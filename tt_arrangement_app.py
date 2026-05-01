@@ -39,8 +39,12 @@ if 'show_password_change' not in st.session_state:
 
 # Create necessary directories
 def create_directories():
-    if not os.path.exists(BACKUP_FOLDER):
-        os.makedirs(BACKUP_FOLDER, exist_ok=True)
+    """Create necessary directories if they don't exist"""
+    try:
+        if not os.path.exists(BACKUP_FOLDER):
+            os.makedirs(BACKUP_FOLDER, exist_ok=True)
+    except Exception as e:
+        st.error(f"Error creating directories: {e}")
 
 create_directories()
 
@@ -50,6 +54,7 @@ def hash_password(password):
 
 # Load users from JSON file
 def load_users():
+    """Load users with proper error handling"""
     try:
         if os.path.exists(USER_DB_FILE):
             with open(USER_DB_FILE, 'r', encoding='utf-8') as f:
@@ -62,116 +67,87 @@ def load_users():
                     "name": "Administrator",
                     "designation": "Admin",
                     "role": "admin",
-                    "first_login": True,  # Flag to force password change
+                    "first_login": True,
                     "password_last_changed": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
             }
             save_users(default_users)
             return default_users
+    except json.JSONDecodeError:
+        st.error("Users file is corrupted. Creating new one...")
+        default_users = {
+            "admin": {
+                "password": hash_password("admin123"),
+                "name": "Administrator",
+                "designation": "Admin",
+                "role": "admin",
+                "first_login": True,
+                "password_last_changed": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        }
+        save_users(default_users)
+        return default_users
     except Exception as e:
         st.error(f"Error loading users: {e}")
         return {"admin": {"password": hash_password("admin123"), "name": "Admin", "designation": "Admin", "role": "admin", "first_login": True}}
 
 # Save users to JSON file
 def save_users(users):
+    """Save users with error handling"""
     try:
         with open(USER_DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(users, f, indent=4)
+        return True
     except Exception as e:
         st.error(f"Error saving users: {e}")
+        return False
 
-# Change password function
-def change_password(username, old_password, new_password, confirm_password):
-    """Change user password with validation"""
-    users = load_users()
-    
-    if username not in users:
-        return False, "User not found"
-    
-    # Verify old password
-    if users[username]['password'] != hash_password(old_password):
-        return False, "Current password is incorrect"
-    
-    # Check if new password is same as old
-    if old_password == new_password:
-        return False, "New password cannot be the same as current password"
-    
-    # Check password length
-    if len(new_password) < 6:
-        return False, "New password must be at least 6 characters long"
-    
-    # Check if passwords match
-    if new_password != confirm_password:
-        return False, "New passwords do not match"
-    
-    # Update password
-    users[username]['password'] = hash_password(new_password)
-    users[username]['first_login'] = False
-    users[username]['password_last_changed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    save_users(users)
-    return True, "Password changed successfully!"
-
-# Reset user password (admin only)
-def reset_user_password(username, new_password):
-    """Admin function to reset user password"""
-    users = load_users()
-    
-    if username not in users:
-        return False, "User not found"
-    
-    if len(new_password) < 6:
-        return False, "Password must be at least 6 characters long"
-    
-    users[username]['password'] = hash_password(new_password)
-    users[username]['first_login'] = False
-    users[username]['password_last_changed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    save_users(users)
-    return True, f"Password reset for {username} successfully!"
-
-# Password change form
-def password_change_form():
-    """Display password change form"""
-    st.markdown("---")
-    st.subheader("🔐 Change Password")
-    st.warning("⚠️ For security reasons, please change your default password")
-    
-    with st.form("change_password_form"):
-        old_password = st.text_input("Current Password", type="password")
-        new_password = st.text_input("New Password", type="password", 
-                                     help="Password must be at least 6 characters long")
-        confirm_password = st.text_input("Confirm New Password", type="password")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            submit = st.form_submit_button("Change Password", type="primary")
-        with col2:
-            skip = st.form_submit_button("Remind Me Later")
-    
-    if submit:
-        if old_password and new_password and confirm_password:
-            success, message = change_password(
-                st.session_state.username, 
-                old_password, 
-                new_password, 
-                confirm_password
-            )
-            if success:
-                st.success(message)
-                st.session_state.password_changed = True
-                st.session_state.show_password_change = False
-                st.balloons()
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error(message)
+# Load arrangements - FIXED VERSION
+def load_arrangements():
+    """Load arrangements with proper error handling"""
+    try:
+        if os.path.exists(ARRANGEMENT_FILE):
+            with open(ARRANGEMENT_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if content.strip():  # Check if file is not empty
+                    return json.loads(content)
+                else:
+                    return {}
         else:
-            st.error("Please fill all fields")
-    
-    if skip:
-        st.session_state.show_password_change = False
-        st.rerun()
+            # Create empty arrangements file
+            save_arrangements({})
+            return {}
+    except json.JSONDecodeError:
+        st.warning("Arrangements file was corrupted. Creating new one...")
+        save_arrangements({})
+        return {}
+    except Exception as e:
+        st.error(f"Error loading arrangements: {e}")
+        return {}
+
+# Save arrangements - FIXED VERSION
+def save_arrangements(arrangements):
+    """Save arrangements with error handling"""
+    try:
+        # Ensure arrangements is a dictionary
+        if arrangements is None:
+            arrangements = {}
+        
+        with open(ARRANGEMENT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(arrangements, f, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Error saving arrangements: {e}")
+        return False
+
+# Check if file is locked
+def is_file_locked(filepath):
+    try:
+        with open(filepath, 'a'):
+            pass
+        return False
+    except (PermissionError, OSError):
+        return True
 
 # Load timetable with multiple engine support
 @st.cache_data(ttl=300)
@@ -298,6 +274,99 @@ def delete_timetable_file():
         st.error(f"Error deleting file: {e}")
         return False
 
+# Change password function
+def change_password(username, old_password, new_password, confirm_password):
+    """Change user password with validation"""
+    users = load_users()
+    
+    if username not in users:
+        return False, "User not found"
+    
+    # Verify old password
+    if users[username]['password'] != hash_password(old_password):
+        return False, "Current password is incorrect"
+    
+    # Check if new password is same as old
+    if old_password == new_password:
+        return False, "New password cannot be the same as current password"
+    
+    # Check password length
+    if len(new_password) < 6:
+        return False, "New password must be at least 6 characters long"
+    
+    # Check if passwords match
+    if new_password != confirm_password:
+        return False, "New passwords do not match"
+    
+    # Update password
+    users[username]['password'] = hash_password(new_password)
+    users[username]['first_login'] = False
+    users[username]['password_last_changed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    save_users(users)
+    return True, "Password changed successfully!"
+
+# Reset user password (admin only)
+def reset_user_password(username, new_password):
+    """Admin function to reset user password"""
+    users = load_users()
+    
+    if username not in users:
+        return False, "User not found"
+    
+    if len(new_password) < 6:
+        return False, "Password must be at least 6 characters long"
+    
+    users[username]['password'] = hash_password(new_password)
+    users[username]['first_login'] = False
+    users[username]['password_last_changed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    save_users(users)
+    return True, f"Password reset for {username} successfully!"
+
+# Password change form
+def password_change_form():
+    """Display password change form"""
+    st.markdown("---")
+    st.subheader("🔐 Change Password")
+    st.warning("⚠️ For security reasons, please change your default password")
+    
+    with st.form("change_password_form"):
+        old_password = st.text_input("Current Password", type="password")
+        new_password = st.text_input("New Password", type="password", 
+                                     help="Password must be at least 6 characters long")
+        confirm_password = st.text_input("Confirm New Password", type="password")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            submit = st.form_submit_button("Change Password", type="primary")
+        with col2:
+            skip = st.form_submit_button("Remind Me Later")
+    
+    if submit:
+        if old_password and new_password and confirm_password:
+            success, message = change_password(
+                st.session_state.username, 
+                old_password, 
+                new_password, 
+                confirm_password
+            )
+            if success:
+                st.success(message)
+                st.session_state.password_changed = True
+                st.session_state.show_password_change = False
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(message)
+        else:
+            st.error("Please fill all fields")
+    
+    if skip:
+        st.session_state.show_password_change = False
+        st.rerun()
+
 # Login function with first login check
 def login(username, password):
     users = load_users()
@@ -328,7 +397,7 @@ def logout():
     st.session_state.password_changed = False
     st.rerun()
 
-# Admin panel with password management
+# Admin panel
 def admin_panel():
     st.header("👑 Admin Panel")
     
@@ -367,7 +436,7 @@ def admin_panel():
                 else:
                     st.error("Please fill all fields!")
     
-    # Manage Users Tab (Enhanced with password reset)
+    # Manage Users Tab
     with tab2:
         st.subheader("Manage Users")
         users = load_users()
@@ -497,7 +566,7 @@ def admin_panel():
             except Exception as e:
                 st.error(f"Error reading file: {e}")
     
-    # Arrangement Management Tab
+    # Arrangement Management Tab - FIXED VERSION
     with tab4:
         st.subheader("📋 Teacher Absence & Arrangement Management")
         
@@ -506,60 +575,89 @@ def admin_panel():
             st.warning("Please upload timetable first")
             return
         
-        days = df['Day'].unique()
-        time_periods = df['Time'].unique()
-        teachers = df['Teacher'].unique()
+        # Safe loading of arrangements
+        arrangements = load_arrangements()
+        if arrangements is None:
+            arrangements = {}
+        
+        days = df['Day'].unique() if not df.empty else []
+        time_periods = df['Time'].unique() if not df.empty else []
+        teachers = df['Teacher'].unique() if not df.empty else []
+        
+        if len(days) == 0 or len(time_periods) == 0 or len(teachers) == 0:
+            st.warning("Timetable data is incomplete. Please check the timetable file.")
+            return
         
         st.subheader("1️⃣ Report Teacher Absence")
         with st.form("absence_form"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                absent_teacher = st.selectbox("Absent Teacher", teachers)
+                absent_teacher = st.selectbox("Absent Teacher", teachers.tolist() if hasattr(teachers, 'tolist') else list(teachers))
             with col2:
-                absence_day = st.selectbox("Day of Absence", days)
+                absence_day = st.selectbox("Day of Absence", days.tolist() if hasattr(days, 'tolist') else list(days))
             with col3:
-                absence_time = st.selectbox("Time Period", time_periods)
+                absence_time = st.selectbox("Time Period", time_periods.tolist() if hasattr(time_periods, 'tolist') else list(time_periods))
             
             reason = st.text_area("Reason for Absence (Optional)")
             
             if st.form_submit_button("Report Absence"):
-                absent_class = df[(df['Day'] == absence_day) & 
-                                 (df['Time'] == absence_time) & 
-                                 (df['Teacher'] == absent_teacher)]
-                
-                if not absent_class.empty:
-                    subject = absent_class.iloc[0]['Subject']
-                    class_name = absent_class.iloc[0]['Class']
+                try:
+                    absent_class = df[(df['Day'] == absence_day) & 
+                                     (df['Time'] == absence_time) & 
+                                     (df['Teacher'] == absent_teacher)]
                     
-                    busy_teachers = df[(df['Day'] == absence_day) & (df['Time'] == absence_time)]['Teacher'].tolist()
-                    all_teachers = df['Teacher'].unique()
-                    available = [t for t in all_teachers if t not in busy_teachers and t != absent_teacher]
-                    
-                    if available:
-                        suggested_teacher = available[0]
-                        st.success(f"✅ Suggested replacement: {suggested_teacher}")
-                        st.info(f"Class: {class_name}, Subject: {subject}")
+                    if not absent_class.empty:
+                        subject = absent_class.iloc[0]['Subject']
+                        class_name = absent_class.iloc[0]['Class']
                         
-                        arrangements = load_arrangements()
-                        key = f"{absence_day}_{absence_time}_{class_name}"
-                        arrangements[key] = {
-                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "absent_teacher": absent_teacher,
-                            "replacement_teacher": suggested_teacher,
-                            "class": class_name,
-                            "subject": subject,
-                            "day": absence_day,
-                            "time": absence_time,
-                            "reason": reason,
-                            "status": "pending"
-                        }
-                        save_arrangements(arrangements)
+                        busy_teachers = df[(df['Day'] == absence_day) & (df['Time'] == absence_time)]['Teacher'].tolist()
+                        all_teachers = df['Teacher'].unique()
+                        available = [t for t in all_teachers if t not in busy_teachers and t != absent_teacher]
+                        
+                        if available:
+                            suggested_teacher = available[0]
+                            st.success(f"✅ Suggested replacement: {suggested_teacher}")
+                            st.info(f"Class: {class_name}, Subject: {subject}")
+                            
+                            # Save arrangement
+                            arrangements = load_arrangements()
+                            if arrangements is None:
+                                arrangements = {}
+                            
+                            key = f"{absence_day}_{absence_time}_{class_name}"
+                            arrangements[key] = {
+                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "absent_teacher": absent_teacher,
+                                "replacement_teacher": suggested_teacher,
+                                "class": class_name,
+                                "subject": subject,
+                                "day": absence_day,
+                                "time": absence_time,
+                                "reason": reason,
+                                "status": "pending"
+                            }
+                            save_arrangements(arrangements)
+                        else:
+                            st.error("❌ No available teachers found")
                     else:
-                        st.error("❌ No available teachers found")
-                else:
-                    st.error("No class found for this teacher at specified time")
+                        st.error("No class found for this teacher at specified time")
+                except Exception as e:
+                    st.error(f"Error reporting absence: {e}")
+        
+        # Display existing arrangements
+        st.subheader("2️⃣ Existing Arrangements")
+        arrangements = load_arrangements()
+        if arrangements and len(arrangements) > 0:
+            for key, value in list(arrangements.items())[:5]:  # Show last 5
+                with st.expander(f"Arrangement: {value.get('day', 'N/A')} - {value.get('class', 'N/A')}"):
+                    st.write(f"**Absent Teacher:** {value.get('absent_teacher', 'N/A')}")
+                    st.write(f"**Replacement:** {value.get('replacement_teacher', 'N/A')}")
+                    st.write(f"**Status:** {value.get('status', 'N/A')}")
+                    st.write(f"**Date:** {value.get('date', 'N/A')}")
+        else:
+            st.info("No arrangements found")
     
-    # Security Settings Tab (New)
+    # Security Settings Tab
     with tab5:
         st.subheader("🔒 Security Settings")
         
@@ -594,7 +692,7 @@ def admin_panel():
             save_users(users)
             st.success("All users will be required to change password on next login")
 
-# User dashboard with password change option
+# User dashboard
 def user_dashboard():
     st.header(f"👋 Welcome, {st.session_state.name}!")
     st.write(f"**Designation:** {st.session_state.designation}")
@@ -638,7 +736,7 @@ def user_dashboard():
     st.subheader("🔄 Your Arrangement Assignments")
     arrangements = load_arrangements()
     
-    if arrangements:
+    if arrangements and len(arrangements) > 0:
         user_arrangements = []
         for key, value in arrangements.items():
             if value.get('replacement_teacher') == st.session_state.name:
