@@ -8,6 +8,8 @@ import tempfile
 from datetime import datetime
 import time
 import gc
+from collections import defaultdict, Counter
+import numpy as np
 
 # Try to import openpyxl with error handling
 try:
@@ -22,6 +24,7 @@ USER_DB_FILE = os.path.join(BASE_DIR, "users.json")
 TIMETABLE_FILE = os.path.join(BASE_DIR, "timetable.xlsx")
 ARRANGEMENT_FILE = os.path.join(BASE_DIR, "arrangements.json")
 BACKUP_FOLDER = os.path.join(BASE_DIR, "backups")
+CLASSROOM_FILE = os.path.join(BASE_DIR, "classrooms.json")
 
 # Initialize session state
 if 'logged_in' not in st.session_state:
@@ -36,6 +39,10 @@ if 'password_changed' not in st.session_state:
     st.session_state.password_changed = False
 if 'show_password_change' not in st.session_state:
     st.session_state.show_password_change = False
+if 'editing_mode' not in st.session_state:
+    st.session_state.editing_mode = False
+if 'edit_df' not in st.session_state:
+    st.session_state.edit_df = None
 
 # Create necessary directories
 def create_directories():
@@ -60,7 +67,6 @@ def load_users():
             with open(USER_DB_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         else:
-            # Default admin user with flag for first login
             default_users = {
                 "admin": {
                     "password": hash_password("admin123"),
@@ -102,19 +108,51 @@ def save_users(users):
         st.error(f"Error saving users: {e}")
         return False
 
-# Load arrangements - FIXED VERSION
+# Load classrooms
+def load_classrooms():
+    """Load classroom data"""
+    try:
+        if os.path.exists(CLASSROOM_FILE):
+            with open(CLASSROOM_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if content.strip():
+                    return json.loads(content)
+                else:
+                    return {}
+        else:
+            save_classrooms({})
+            return {}
+    except json.JSONDecodeError:
+        save_classrooms({})
+        return {}
+    except Exception as e:
+        st.error(f"Error loading classrooms: {e}")
+        return {}
+
+def save_classrooms(classrooms):
+    """Save classroom data"""
+    try:
+        if classrooms is None:
+            classrooms = {}
+        with open(CLASSROOM_FILE, 'w', encoding='utf-8') as f:
+            json.dump(classrooms, f, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Error saving classrooms: {e}")
+        return False
+
+# Load arrangements
 def load_arrangements():
     """Load arrangements with proper error handling"""
     try:
         if os.path.exists(ARRANGEMENT_FILE):
             with open(ARRANGEMENT_FILE, 'r', encoding='utf-8') as f:
                 content = f.read()
-                if content.strip():  # Check if file is not empty
+                if content.strip():
                     return json.loads(content)
                 else:
                     return {}
         else:
-            # Create empty arrangements file
             save_arrangements({})
             return {}
     except json.JSONDecodeError:
@@ -125,14 +163,12 @@ def load_arrangements():
         st.error(f"Error loading arrangements: {e}")
         return {}
 
-# Save arrangements - FIXED VERSION
+# Save arrangements
 def save_arrangements(arrangements):
     """Save arrangements with error handling"""
     try:
-        # Ensure arrangements is a dictionary
         if arrangements is None:
             arrangements = {}
-        
         with open(ARRANGEMENT_FILE, 'w', encoding='utf-8') as f:
             json.dump(arrangements, f, indent=4)
         return True
@@ -140,16 +176,7 @@ def save_arrangements(arrangements):
         st.error(f"Error saving arrangements: {e}")
         return False
 
-# Check if file is locked
-def is_file_locked(filepath):
-    try:
-        with open(filepath, 'a'):
-            pass
-        return False
-    except (PermissionError, OSError):
-        return True
-
-# Load timetable with multiple engine support
+# Load timetable
 @st.cache_data(ttl=300)
 def load_timetable():
     """Load timetable with multiple fallback methods"""
@@ -163,7 +190,6 @@ def load_timetable():
             st.warning("No timetable file found. Creating sample data...")
             return create_sample_timetable()
         
-        # Try to read with openpyxl
         try:
             df = pd.read_excel(TIMETABLE_FILE, engine='openpyxl')
             if not df.empty:
@@ -172,7 +198,6 @@ def load_timetable():
         except Exception as e:
             st.warning(f"Could not read with openpyxl: {e}")
             
-        # Try alternative method without engine specification
         try:
             df = pd.read_excel(TIMETABLE_FILE)
             if not df.empty:
@@ -181,7 +206,6 @@ def load_timetable():
         except Exception as e:
             st.warning(f"Could not read with default engine: {e}")
             
-        # If all fail, create sample
         return create_sample_timetable()
             
     except Exception as e:
@@ -215,7 +239,6 @@ def save_timetable(df):
         gc.collect()
         time.sleep(0.5)
         
-        # Method 1: Direct save with explicit engine
         try:
             df.to_excel(TIMETABLE_FILE, index=False, engine='openpyxl')
             st.session_state.timetable_df = df
@@ -224,7 +247,6 @@ def save_timetable(df):
         except Exception as e1:
             st.warning(f"Direct save failed: {e1}")
             
-            # Method 2: Save with xlsxwriter (alternative)
             try:
                 df.to_excel(TIMETABLE_FILE, index=False, engine='xlsxwriter')
                 st.session_state.timetable_df = df
@@ -233,7 +255,6 @@ def save_timetable(df):
             except Exception as e2:
                 st.warning(f"Alternative engine failed: {e2}")
                 
-                # Method 3: Use temporary file with proper extension
                 try:
                     temp_file = tempfile.NamedTemporaryFile(
                         delete=False, 
@@ -260,21 +281,494 @@ def save_timetable(df):
         st.error(f"Unexpected error saving: {e}")
         return False
 
-def delete_timetable_file():
-    """Delete the timetable file safely"""
-    try:
-        if os.path.exists(TIMETABLE_FILE):
-            backup_name = os.path.join(BACKUP_FOLDER, f"deleted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-            shutil.copy2(TIMETABLE_FILE, backup_name)
-            os.remove(TIMETABLE_FILE)
-            st.success(f"File deleted. Backup saved")
-            st.cache_data.clear()
-            return True
-    except Exception as e:
-        st.error(f"Error deleting file: {e}")
-        return False
+# ============ PREDICTION SYSTEM ============
 
-# Change password function
+def get_teacher_availability(df, day, time_slot, exclude_teacher=None):
+    """Get available teachers for a given time slot"""
+    busy_teachers = df[(df['Day'] == day) & (df['Time'] == time_slot)]['Teacher'].tolist()
+    all_teachers = df['Teacher'].unique()
+    
+    available = []
+    for teacher in all_teachers:
+        if teacher not in busy_teachers and teacher != exclude_teacher:
+            # Check if teacher has any duties at this time
+            teacher_duties = df[(df['Day'] == day) & (df['Time'] == time_slot) & (df['Teacher'] == teacher)]
+            if teacher_duties.empty:
+                available.append(teacher)
+    
+    return available
+
+def calculate_teacher_load(df, teacher):
+    """Calculate weekly load for a teacher"""
+    return len(df[df['Teacher'] == teacher])
+
+def get_teacher_vacant_periods(df, teacher, day):
+    """Get all vacant periods for a teacher on a specific day"""
+    teacher_schedule = df[(df['Teacher'] == teacher) & (df['Day'] == day)]
+    teacher_times = set(teacher_schedule['Time'].tolist())
+    all_times = set(df[df['Day'] == day]['Time'].unique())
+    
+    vacant_periods = all_times - teacher_times
+    return list(vacant_periods)
+
+def predict_best_replacement(df, absent_teacher, day, time_slot, class_name, subject):
+    """PREDICTION ALGORITHM: Find best replacement teacher based on multiple criteria"""
+    
+    # Get all teachers who can teach this subject (based on designation)
+    subject_teachers = df[df['Subject'] == subject]['Teacher'].unique()
+    
+    # Get busy teachers at this time
+    busy_teachers = df[(df['Day'] == day) & (df['Time'] == time_slot)]['Teacher'].tolist()
+    
+    # Get teachers on duty at this time
+    on_duty = df[(df['Day'] == day) & (df['Time'] == time_slot) & (df['Designation'].str.contains('Duty', case=False, na=False))]['Teacher'].tolist()
+    
+    candidates = []
+    
+    for teacher in subject_teachers:
+        # Condition 1: Teacher is present (not absent)
+        if teacher == absent_teacher:
+            continue
+        
+        # Condition 2: Teacher is vacant in this period
+        if teacher in busy_teachers:
+            continue
+        
+        # Condition 3: Teacher has no duty at this time
+        if teacher in on_duty:
+            continue
+        
+        # Calculate priority score
+        score = 0
+        
+        # Lower current load is better
+        load = calculate_teacher_load(df, teacher)
+        score += (100 - load)  # Less load = higher score
+        
+        # Check if teacher has consecutive free periods (for serial classes)
+        vacant_periods = get_teacher_vacant_periods(df, teacher, day)
+        if len(vacant_periods) >= 2:  # Can handle 2+ classes serially
+            score += 30
+        
+        # Teacher who handled this class before gets bonus
+        if len(df[(df['Teacher'] == teacher) & (df['Class'] == class_name)]) > 0:
+            score += 20
+        
+        candidates.append((teacher, score))
+    
+    # Sort by score (highest first)
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    
+    if candidates:
+        return candidates[0][0]
+    else:
+        # Fallback: Any available teacher
+        all_available = get_teacher_availability(df, day, time_slot, absent_teacher)
+        return all_available[0] if all_available else None
+
+def check_crisis_mode(df, arrangements):
+    """Check if absent teacher count exceeds 40%"""
+    total_teachers = len(df['Teacher'].unique())
+    
+    # Count unique absent teachers in last 7 days
+    recent_absences = set()
+    for key, value in arrangements.items():
+        if 'status' in value and value['status'] == 'pending':
+            recent_absences.add(value.get('absent_teacher'))
+    
+    absent_count = len(recent_absences)
+    
+    if total_teachers > 0 and (absent_count / total_teachers) >= 0.4:
+        return True, absent_count, total_teachers
+    return False, absent_count, total_teachers
+
+def get_serial_class_recommendations(df, day, time_slot, available_teacher):
+    """Get recommendations for serial classes (3-4 classes in a row)"""
+    
+    # Find all classes at this time that need coverage
+    classes_at_time = df[(df['Day'] == day) & (df['Time'] == time_slot)]
+    
+    # Check if teacher can take multiple consecutive classes
+    vacant_periods = get_teacher_vacant_periods(df, available_teacher, day)
+    
+    serial_recommendations = []
+    
+    # Find next time slots
+    all_times = sorted(df['Time'].unique())
+    current_index = all_times.index(time_slot) if time_slot in all_times else -1
+    
+    if current_index != -1:
+        consecutive_slots = []
+        for i in range(current_index, min(current_index + 4, len(all_times))):
+            if all_times[i] in vacant_periods:
+                consecutive_slots.append(all_times[i])
+            else:
+                break
+        
+        if len(consecutive_slots) >= 2:
+            for slot in consecutive_slots:
+                classes_to_cover = df[(df['Day'] == day) & (df['Time'] == slot)]
+                for _, row in classes_to_cover.iterrows():
+                    serial_recommendations.append({
+                        'time': slot,
+                        'class': row['Class'],
+                        'subject': row['Subject']
+                    })
+    
+    return serial_recommendations
+
+# ============ ONLINE TIMETABLE EDITOR ============
+
+def edit_timetable_online():
+    """Inline editor for timetable"""
+    st.subheader("✏️ Online Timetable Editor")
+    
+    df = load_timetable()
+    
+    if df.empty:
+        st.warning("No timetable data available. Please upload or create a new one.")
+        return
+    
+    # Edit mode toggle
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        if st.button("✏️ Enable Edit Mode", type="primary" if not st.session_state.editing_mode else "secondary"):
+            st.session_state.editing_mode = True
+            st.session_state.edit_df = df.copy()
+            st.rerun()
+    
+    with col2:
+        if st.button("📥 Export Excel"):
+            if save_timetable(df):
+                st.success("Timetable exported successfully!")
+    
+    with col3:
+        if st.button("🔄 Refresh"):
+            st.cache_data.clear()
+            st.rerun()
+    
+    if st.session_state.editing_mode:
+        st.info("📝 Edit Mode Active - Click on any cell to edit, then click 'Save Changes'")
+        
+        # Create editable dataframe
+        edited_df = st.data_editor(
+            st.session_state.edit_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Day": st.column_config.SelectboxColumn(
+                    "Day",
+                    options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+                    required=True
+                ),
+                "Time": st.column_config.TextColumn("Time", required=True),
+                "Teacher": st.column_config.TextColumn("Teacher", required=True),
+                "Subject": st.column_config.TextColumn("Subject", required=True),
+                "Class": st.column_config.TextColumn("Class", required=True),
+                "Designation": st.column_config.TextColumn("Designation", required=True)
+            }
+        )
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("💾 Save Changes", type="primary"):
+                if save_timetable(edited_df):
+                    st.success("Timetable saved successfully!")
+                    st.session_state.editing_mode = False
+                    st.session_state.edit_df = None
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Failed to save timetable")
+        
+        with col2:
+            if st.button("❌ Cancel Editing"):
+                st.session_state.editing_mode = False
+                st.session_state.edit_df = None
+                st.rerun()
+        
+        with col3:
+            if st.button("➕ Add New Row"):
+                new_row = pd.DataFrame([{
+                    'Day': 'Monday',
+                    'Time': '11:00-12:00',
+                    'Teacher': 'New Teacher',
+                    'Subject': 'New Subject',
+                    'Class': 'New Class',
+                    'Designation': 'New Designation'
+                }])
+                st.session_state.edit_df = pd.concat([st.session_state.edit_df, new_row], ignore_index=True)
+                st.rerun()
+        
+        with col4:
+            if st.button("🗑️ Delete Last Row"):
+                if len(st.session_state.edit_df) > 0:
+                    st.session_state.edit_df = st.session_state.edit_df.iloc[:-1]
+                    st.rerun()
+    
+    else:
+        # Display mode
+        st.dataframe(df, use_container_width=True)
+        
+        # Summary statistics
+        st.subheader("📊 Timetable Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Classes", len(df))
+        with col2:
+            st.metric("Unique Teachers", len(df['Teacher'].unique()))
+        with col3:
+            st.metric("Unique Subjects", len(df['Subject'].unique()))
+        with col4:
+            st.metric("Unique Classes", len(df['Class'].unique()))
+
+# ============ CLASSROOM MANAGEMENT UI ============
+
+def classroom_management():
+    """Complete classroom management interface"""
+    st.subheader("🏫 Classroom Management")
+    
+    classrooms = load_classrooms()
+    
+    # Tabs for different operations
+    tab1, tab2, tab3 = st.tabs(["📋 View Classrooms", "➕ Add/Edit Classroom", "🗑️ Delete Classroom"])
+    
+    # View Classrooms
+    with tab1:
+        if classrooms:
+            # Display as cards
+            for room_id, room_data in classrooms.items():
+                with st.container():
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    with col1:
+                        st.markdown(f"**🏠 {room_data.get('name', room_id)}**")
+                    with col2:
+                        st.markdown(f"Capacity: {room_data.get('capacity', 'N/A')} students")
+                    with col3:
+                        st.markdown(f"Floor: {room_data.get('floor', 'N/A')}")
+                    
+                    if room_data.get('equipment'):
+                        st.caption(f"🛠️ Equipment: {', '.join(room_data['equipment'])}")
+                    
+                    if room_data.get('current_class'):
+                        st.info(f"📚 Current Class: {room_data['current_class']}")
+                    
+                    st.markdown("---")
+        else:
+            st.info("No classrooms added yet. Use 'Add Classroom' tab to add.")
+    
+    # Add/Edit Classroom
+    with tab2:
+        st.subheader("Add/Edit Classroom")
+        
+        operation = st.radio("Select Operation", ["Add New Classroom", "Edit Existing Classroom"])
+        
+        if operation == "Edit Existing Classroom" and classrooms:
+            selected_room = st.selectbox("Select Classroom to Edit", list(classrooms.keys()))
+            room_data = classrooms.get(selected_room, {})
+        else:
+            selected_room = None
+            room_data = {}
+        
+        with st.form("classroom_form"):
+            room_name = st.text_input("Classroom Name/Room Number", value=room_data.get('name', '') if room_data else '')
+            capacity = st.number_input("Capacity (Number of Students)", min_value=1, value=room_data.get('capacity', 30) if room_data else 30)
+            floor = st.number_input("Floor Level", min_value=0, max_value=10, value=room_data.get('floor', 1) if room_data else 1)
+            
+            equipment = st.multiselect(
+                "Equipment Available",
+                options=["Projector", "Smart Board", "AC", "Computers", "WiFi", "Whiteboard", "Speakers", "Microphone"],
+                default=room_data.get('equipment', []) if room_data else []
+            )
+            
+            current_class = st.text_input("Currently Assigned Class (Optional)", value=room_data.get('current_class', '') if room_data else '')
+            
+            submitted = st.form_submit_button("Save Classroom")
+            
+            if submitted:
+                if room_name:
+                    room_id = room_name.replace(" ", "_").lower()
+                    classrooms[room_id] = {
+                        "name": room_name,
+                        "capacity": capacity,
+                        "floor": floor,
+                        "equipment": equipment,
+                        "current_class": current_class,
+                        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    save_classrooms(classrooms)
+                    st.success(f"Classroom '{room_name}' saved successfully!")
+                    st.rerun()
+                else:
+                    st.error("Please enter classroom name")
+    
+    # Delete Classroom
+    with tab3:
+        if classrooms:
+            st.subheader("Delete Classroom")
+            room_to_delete = st.selectbox("Select Classroom to Delete", list(classrooms.keys()))
+            
+            if st.button("🗑️ Delete Classroom", type="secondary"):
+                confirm = st.checkbox("I confirm deletion of this classroom")
+                if confirm:
+                    del classrooms[room_to_delete]
+                    save_classrooms(classrooms)
+                    st.success(f"Classroom deleted successfully!")
+                    st.rerun()
+        else:
+            st.info("No classrooms to delete")
+
+# ============ IMPROVED ARRANGEMENT SYSTEM ============
+
+def arrangement_management():
+    """Enhanced arrangement management with prediction"""
+    st.subheader("📋 Teacher Absence & Intelligent Arrangement System")
+    
+    df = load_timetable()
+    if df.empty:
+        st.warning("Please upload timetable first")
+        return
+    
+    arrangements = load_arrangements()
+    if arrangements is None:
+        arrangements = {}
+    
+    # Check crisis mode
+    crisis_mode, absent_count, total_teachers = check_crisis_mode(df, arrangements)
+    
+    if crisis_mode:
+        st.error(f"⚠️ **CRISIS MODE ACTIVATED!** {absent_count}/{total_teachers} teachers absent ({int(absent_count/total_teachers*100)}%)")
+        st.warning("Using Serial Class Prediction System - Teachers will be assigned 3-4 consecutive classes")
+    
+    days = df['Day'].unique() if not df.empty else []
+    time_periods = df['Time'].unique() if not df.empty else []
+    teachers = df['Teacher'].unique() if not df.empty else []
+    
+    # Absence Reporting
+    st.subheader("1️⃣ Report Teacher Absence (With Prediction)")
+    with st.form("absence_form"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            absent_teacher = st.selectbox("Absent Teacher", teachers.tolist())
+        with col2:
+            absence_day = st.selectbox("Day of Absence", days.tolist())
+        with col3:
+            absence_time = st.selectbox("Time Period", time_periods.tolist())
+        
+        reason = st.text_area("Reason for Absence")
+        
+        if st.form_submit_button("Report Absence & Get Prediction"):
+            try:
+                absent_class = df[(df['Day'] == absence_day) & 
+                                 (df['Time'] == absence_time) & 
+                                 (df['Teacher'] == absent_teacher)]
+                
+                if not absent_class.empty:
+                    subject = absent_class.iloc[0]['Subject']
+                    class_name = absent_class.iloc[0]['Class']
+                    
+                    # Use prediction algorithm
+                    if crisis_mode:
+                        # Crisis mode: Find teacher who can take multiple classes
+                        available_teacher = predict_best_replacement(df, absent_teacher, absence_day, absence_time, class_name, subject)
+                        
+                        if available_teacher:
+                            # Get serial class recommendations
+                            serial_classes = get_serial_class_recommendations(df, absence_day, absence_time, available_teacher)
+                            
+                            st.success(f"✅ **Predicted Replacement (Crisis Mode):** {available_teacher}")
+                            st.info(f"📚 Class: {class_name} | Subject: {subject}")
+                            
+                            if serial_classes:
+                                st.warning("🔄 **Serial Class Assignment Available:**")
+                                for sc in serial_classes:
+                                    st.markdown(f"- {sc['time']}: {sc['class']} - {sc['subject']}")
+                            
+                            # Save arrangement with crisis flag
+                            key = f"{absence_day}_{absence_time}_{class_name}"
+                            arrangements[key] = {
+                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "absent_teacher": absent_teacher,
+                                "replacement_teacher": available_teacher,
+                                "class": class_name,
+                                "subject": subject,
+                                "day": absence_day,
+                                "time": absence_time,
+                                "reason": reason,
+                                "status": "assigned",
+                                "crisis_mode": crisis_mode,
+                                "serial_classes": serial_classes
+                            }
+                            save_arrangements(arrangements)
+                        else:
+                            st.error("❌ No available teachers found")
+                    else:
+                        # Normal mode: Find best replacement
+                        best_replacement = predict_best_replacement(df, absent_teacher, absence_day, absence_time, class_name, subject)
+                        
+                        if best_replacement:
+                            st.success(f"✅ **Intelligent Prediction:** {best_replacement}")
+                            st.info(f"📚 Class: {class_name} | Subject: {subject}")
+                            
+                            # Show teacher's vacant periods
+                            vacant_periods = get_teacher_vacant_periods(df, best_replacement, absence_day)
+                            if vacant_periods:
+                                st.caption(f"🕐 {best_replacement}'s vacant periods on {absence_day}: {', '.join(vacant_periods)}")
+                            
+                            # Save arrangement
+                            key = f"{absence_day}_{absence_time}_{class_name}"
+                            arrangements[key] = {
+                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "absent_teacher": absent_teacher,
+                                "replacement_teacher": best_replacement,
+                                "class": class_name,
+                                "subject": subject,
+                                "day": absence_day,
+                                "time": absence_time,
+                                "reason": reason,
+                                "status": "assigned",
+                                "crisis_mode": False
+                            }
+                            save_arrangements(arrangements)
+                        else:
+                            st.error("❌ No suitable replacement found")
+                else:
+                    st.error("No class found for this teacher at specified time")
+            except Exception as e:
+                st.error(f"Error in prediction: {e}")
+    
+    # Display arrangements
+    st.subheader("2️⃣ Current Arrangements")
+    if arrangements and len(arrangements) > 0:
+        for key, value in list(arrangements.items()):
+            with st.expander(f"📅 {value.get('day', 'N/A')} - {value.get('time', 'N/A')} - {value.get('class', 'N/A')}"):
+                st.write(f"**Absent Teacher:** {value.get('absent_teacher', 'N/A')}")
+                st.write(f"**Replacement:** {value.get('replacement_teacher', 'N/A')}")
+                st.write(f"**Subject:** {value.get('subject', 'N/A')}")
+                st.write(f"**Status:** {value.get('status', 'N/A')}")
+                if value.get('crisis_mode'):
+                    st.warning("⚠️ Crisis Mode Assignment")
+                if value.get('serial_classes'):
+                    st.write("**Serial Classes:**")
+                    for sc in value['serial_classes']:
+                        st.write(f"  - {sc['time']}: {sc['class']}")
+                
+                if st.button(f"Mark Complete", key=f"complete_{key}"):
+                    value['status'] = 'completed'
+                    save_arrangements(arrangements)
+                    st.rerun()
+                
+                if st.button(f"Delete", key=f"del_{key}"):
+                    del arrangements[key]
+                    save_arrangements(arrangements)
+                    st.rerun()
+    else:
+        st.info("No pending arrangements")
+
+# ============ REST OF THE FUNCTIONS (login, password, etc.) ============
+
 def change_password(username, old_password, new_password, confirm_password):
     """Change user password with validation"""
     users = load_users()
@@ -282,23 +776,18 @@ def change_password(username, old_password, new_password, confirm_password):
     if username not in users:
         return False, "User not found"
     
-    # Verify old password
     if users[username]['password'] != hash_password(old_password):
         return False, "Current password is incorrect"
     
-    # Check if new password is same as old
     if old_password == new_password:
         return False, "New password cannot be the same as current password"
     
-    # Check password length
     if len(new_password) < 6:
         return False, "New password must be at least 6 characters long"
     
-    # Check if passwords match
     if new_password != confirm_password:
         return False, "New passwords do not match"
     
-    # Update password
     users[username]['password'] = hash_password(new_password)
     users[username]['first_login'] = False
     users[username]['password_last_changed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -306,7 +795,6 @@ def change_password(username, old_password, new_password, confirm_password):
     save_users(users)
     return True, "Password changed successfully!"
 
-# Reset user password (admin only)
 def reset_user_password(username, new_password):
     """Admin function to reset user password"""
     users = load_users()
@@ -324,7 +812,6 @@ def reset_user_password(username, new_password):
     save_users(users)
     return True, f"Password reset for {username} successfully!"
 
-# Password change form
 def password_change_form():
     """Display password change form"""
     st.markdown("---")
@@ -367,7 +854,6 @@ def password_change_form():
         st.session_state.show_password_change = False
         st.rerun()
 
-# Login function with first login check
 def login(username, password):
     users = load_users()
     if username in users and users[username]['password'] == hash_password(password):
@@ -377,7 +863,6 @@ def login(username, password):
         st.session_state.name = users[username]['name']
         st.session_state.designation = users[username]['designation']
         
-        # Check if first login and user is admin
         if users[username].get('first_login', False) and username == 'admin':
             st.session_state.show_password_change = True
         else:
@@ -386,7 +871,6 @@ def login(username, password):
         return True
     return False
 
-# Logout function
 def logout():
     st.session_state.logged_in = False
     st.session_state.username = None
@@ -395,20 +879,22 @@ def logout():
     st.session_state.designation = None
     st.session_state.show_password_change = False
     st.session_state.password_changed = False
+    st.session_state.editing_mode = False
     st.rerun()
 
-# Admin panel
 def admin_panel():
     st.header("👑 Admin Panel")
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Create User", "Manage Users", "Upload Timetable", "Arrangement Management", "Security Settings"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "Create User", "Manage Users", "Upload Timetable", 
+        "Online Editor", "Classroom Management", "Arrangements"
+    ])
     
-    # Create User Tab
     with tab1:
         st.subheader("Create New User")
         with st.form("create_user_form"):
             new_username = st.text_input("Username")
-            new_password = st.text_input("Password", type="password", help="Minimum 6 characters")
+            new_password = st.text_input("Password", type="password")
             new_name = st.text_input("Full Name")
             new_designation = st.text_input("Designation")
             new_role = st.selectbox("Role", ["user", "admin"])
@@ -436,35 +922,10 @@ def admin_panel():
                 else:
                     st.error("Please fill all fields!")
     
-    # Manage Users Tab
     with tab2:
         st.subheader("Manage Users")
         users = load_users()
         user_list = [u for u in users.keys() if u != 'admin']
-        
-        # Admin password change section
-        with st.expander("🔐 Change Your Admin Password", expanded=False):
-            st.write("Change your own admin password")
-            with st.form("admin_change_password"):
-                old_pass = st.text_input("Current Password", type="password")
-                new_pass = st.text_input("New Password", type="password", help="Minimum 6 characters")
-                confirm_pass = st.text_input("Confirm New Password", type="password")
-                
-                if st.form_submit_button("Update My Password", type="primary"):
-                    if old_pass and new_pass and confirm_pass:
-                        success, message = change_password("admin", old_pass, new_pass, confirm_pass)
-                        if success:
-                            st.success(message)
-                            st.info("Please login again with your new password")
-                            time.sleep(2)
-                            logout()
-                        else:
-                            st.error(message)
-                    else:
-                        st.error("Please fill all fields")
-        
-        st.markdown("---")
-        st.subheader("User List")
         
         if user_list:
             for username in user_list:
@@ -472,9 +933,8 @@ def admin_panel():
                     st.write(f"**Name:** {users[username]['name']}")
                     st.write(f"**Designation:** {users[username]['designation']}")
                     st.write(f"**Role:** {users[username]['role']}")
-                    st.write(f"**Password Last Changed:** {users[username].get('password_last_changed', 'Never')}")
                     
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2 = st.columns(2)
                     with col1:
                         if st.button(f"Delete {username}", key=f"del_{username}"):
                             del users[username]
@@ -482,7 +942,6 @@ def admin_panel():
                             st.success(f"User {username} deleted!")
                             st.rerun()
                     with col2:
-                        # Password reset for user
                         with st.popover(f"Reset Password for {username}"):
                             new_pass = st.text_input(f"New password for {username}", type="password", key=f"reset_pass_{username}")
                             if st.button(f"Confirm Reset", key=f"confirm_reset_{username}"):
@@ -490,234 +949,43 @@ def admin_panel():
                                     success, message = reset_user_password(username, new_pass)
                                     if success:
                                         st.success(message)
-                                        time.sleep(1)
                                         st.rerun()
                                     else:
                                         st.error(message)
                                 else:
                                     st.error("Password must be at least 6 characters")
-                    with col3:
-                        st.caption(f"Created: {users[username].get('created_date', 'N/A')}")
         else:
             st.info("No users found except admin")
     
-    # Upload Timetable Tab
     with tab3:
-        st.subheader("Upload Timetable")
+        st.subheader("Upload Timetable (Excel)")
+        uploaded_file = st.file_uploader("Choose Excel file", type=['xlsx', 'xls'])
         
-        if not OPENPYXL_AVAILABLE:
-            st.error("❌ openpyxl is not installed!")
-            st.code("pip install openpyxl", language="bash")
-            return
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if os.path.exists(TIMETABLE_FILE):
-                st.success(f"✅ Current timetable exists")
-            else:
-                st.warning("⚠️ No timetable file exists")
-        
-        with col2:
-            if st.button("🗑️ Delete Current Timetable", type="secondary"):
-                if delete_timetable_file():
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        st.info("""
-        **📋 Required Excel columns:**
-        - Day (Monday, Tuesday, etc.)
-        - Time (9:00-10:00 format)
-        - Teacher (Teacher's name)
-        - Subject (Subject name)
-        - Class (Class name)
-        - Designation (Math Teacher, etc.)
-        """)
-        
-        uploaded_file = st.file_uploader(
-            "Choose Excel file", 
-            type=['xlsx', 'xls'],
-            help="Upload a new timetable file"
-        )
-        
-        if uploaded_file is not None:
+        if uploaded_file:
             try:
-                df = pd.read_excel(uploaded_file, engine='openpyxl')
-                
+                df = pd.read_excel(uploaded_file)
                 required_cols = ['Day', 'Time', 'Teacher', 'Subject', 'Class', 'Designation']
-                missing_cols = [col for col in required_cols if col not in df.columns]
-                
-                if missing_cols:
-                    st.error(f"❌ Missing columns: {missing_cols}")
+                if all(col in df.columns for col in required_cols):
+                    if save_timetable(df):
+                        st.success("Timetable uploaded successfully!")
+                        st.rerun()
                 else:
-                    st.subheader("Preview of uploaded data:")
-                    st.dataframe(df.head())
-                    
-                    if st.button("✅ Upload and Replace Current Timetable", type="primary"):
-                        with st.spinner("Saving timetable..."):
-                            if save_timetable(df):
-                                st.success("✨ Timetable uploaded successfully!")
-                                st.balloons()
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to save timetable")
-                            
+                    st.error(f"Missing columns. Required: {required_cols}")
             except Exception as e:
-                st.error(f"Error reading file: {e}")
+                st.error(f"Error: {e}")
     
-    # Arrangement Management Tab - FIXED VERSION
     with tab4:
-        st.subheader("📋 Teacher Absence & Arrangement Management")
-        
-        df = load_timetable()
-        if df.empty:
-            st.warning("Please upload timetable first")
-            return
-        
-        # Safe loading of arrangements
-        arrangements = load_arrangements()
-        if arrangements is None:
-            arrangements = {}
-        
-        days = df['Day'].unique() if not df.empty else []
-        time_periods = df['Time'].unique() if not df.empty else []
-        teachers = df['Teacher'].unique() if not df.empty else []
-        
-        if len(days) == 0 or len(time_periods) == 0 or len(teachers) == 0:
-            st.warning("Timetable data is incomplete. Please check the timetable file.")
-            return
-        
-        st.subheader("1️⃣ Report Teacher Absence")
-        with st.form("absence_form"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                absent_teacher = st.selectbox("Absent Teacher", teachers.tolist() if hasattr(teachers, 'tolist') else list(teachers))
-            with col2:
-                absence_day = st.selectbox("Day of Absence", days.tolist() if hasattr(days, 'tolist') else list(days))
-            with col3:
-                absence_time = st.selectbox("Time Period", time_periods.tolist() if hasattr(time_periods, 'tolist') else list(time_periods))
-            
-            reason = st.text_area("Reason for Absence (Optional)")
-            
-            if st.form_submit_button("Report Absence"):
-                try:
-                    absent_class = df[(df['Day'] == absence_day) & 
-                                     (df['Time'] == absence_time) & 
-                                     (df['Teacher'] == absent_teacher)]
-                    
-                    if not absent_class.empty:
-                        subject = absent_class.iloc[0]['Subject']
-                        class_name = absent_class.iloc[0]['Class']
-                        
-                        busy_teachers = df[(df['Day'] == absence_day) & (df['Time'] == absence_time)]['Teacher'].tolist()
-                        all_teachers = df['Teacher'].unique()
-                        available = [t for t in all_teachers if t not in busy_teachers and t != absent_teacher]
-                        
-                        if available:
-                            suggested_teacher = available[0]
-                            st.success(f"✅ Suggested replacement: {suggested_teacher}")
-                            st.info(f"Class: {class_name}, Subject: {subject}")
-                            
-                            # Save arrangement
-                            arrangements = load_arrangements()
-                            if arrangements is None:
-                                arrangements = {}
-                            
-                            key = f"{absence_day}_{absence_time}_{class_name}"
-                            arrangements[key] = {
-                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "absent_teacher": absent_teacher,
-                                "replacement_teacher": suggested_teacher,
-                                "class": class_name,
-                                "subject": subject,
-                                "day": absence_day,
-                                "time": absence_time,
-                                "reason": reason,
-                                "status": "pending"
-                            }
-                            save_arrangements(arrangements)
-                        else:
-                            st.error("❌ No available teachers found")
-                    else:
-                        st.error("No class found for this teacher at specified time")
-                except Exception as e:
-                    st.error(f"Error reporting absence: {e}")
-        
-        # Display existing arrangements
-        st.subheader("2️⃣ Existing Arrangements")
-        arrangements = load_arrangements()
-        if arrangements and len(arrangements) > 0:
-            for key, value in list(arrangements.items())[:5]:  # Show last 5
-                with st.expander(f"Arrangement: {value.get('day', 'N/A')} - {value.get('class', 'N/A')}"):
-                    st.write(f"**Absent Teacher:** {value.get('absent_teacher', 'N/A')}")
-                    st.write(f"**Replacement:** {value.get('replacement_teacher', 'N/A')}")
-                    st.write(f"**Status:** {value.get('status', 'N/A')}")
-                    st.write(f"**Date:** {value.get('date', 'N/A')}")
-        else:
-            st.info("No arrangements found")
+        edit_timetable_online()
     
-    # Security Settings Tab
     with tab5:
-        st.subheader("🔒 Security Settings")
-        
-        # Display current security info
-        users = load_users()
-        admin_info = users.get('admin', {})
-        
-        st.info(f"""
-        **Security Information:**
-        - **Last Password Change:** {admin_info.get('password_last_changed', 'Never')}
-        - **First Login Completed:** {'✅ Yes' if not admin_info.get('first_login', True) else '⚠️ No (Default password still active)'}
-        - **Total Users:** {len([u for u in users.keys() if u != 'admin'])}
-        """)
-        
-        st.markdown("---")
-        
-        # Password policy settings
-        st.subheader("📋 Password Policy")
-        st.markdown("""
-        - Minimum password length: **6 characters**
-        - Password cannot be same as current password
-        - Admin must change default password on first login
-        - Users can change their password anytime
-        """)
-        
-        # Option to force password change for all users
-        if st.button("🔐 Force All Users to Change Password on Next Login", type="secondary"):
-            users = load_users()
-            for username in users:
-                if username != 'admin':
-                    users[username]['first_login'] = True
-            save_users(users)
-            st.success("All users will be required to change password on next login")
+        classroom_management()
+    
+    with tab6:
+        arrangement_management()
 
-# User dashboard
 def user_dashboard():
     st.header(f"👋 Welcome, {st.session_state.name}!")
     st.write(f"**Designation:** {st.session_state.designation}")
-    
-    # Add password change option in sidebar for users
-    with st.sidebar:
-        st.markdown("---")
-        with st.expander("🔐 Change Password", expanded=False):
-            with st.form("user_change_password"):
-                old_pass = st.text_input("Current Password", type="password")
-                new_pass = st.text_input("New Password", type="password", help="Minimum 6 characters")
-                confirm_pass = st.text_input("Confirm New Password", type="password")
-                
-                if st.form_submit_button("Update Password"):
-                    if old_pass and new_pass and confirm_pass:
-                        success, message = change_password(st.session_state.username, old_pass, new_pass, confirm_pass)
-                        if success:
-                            st.success(message)
-                            st.info("Please login again with your new password")
-                            time.sleep(2)
-                            logout()
-                        else:
-                            st.error(message)
-                    else:
-                        st.error("Please fill all fields")
     
     df = load_timetable()
     
@@ -745,25 +1013,24 @@ def user_dashboard():
         
         if user_arrangements:
             for arr in user_arrangements:
-                st.info(f"""
-                **📌 Assignment**
-                - **Day/Time:** {arr.get('day')}, {arr.get('time')}
-                - **Class:** {arr.get('class')}
-                - **Subject:** {arr.get('subject')}
-                - **Covering for:** {arr.get('absent_teacher')}
-                """)
+                with st.expander(f"📌 {arr.get('day')} - {arr.get('time')}"):
+                    st.write(f"**Class:** {arr.get('class')}")
+                    st.write(f"**Subject:** {arr.get('subject')}")
+                    st.write(f"**Covering for:** {arr.get('absent_teacher')}")
+                    if arr.get('crisis_mode'):
+                        st.warning("⚠️ Crisis Mode - Multiple classes may be assigned")
         else:
             st.info("No active arrangements")
 
-# Main app
 def main():
     st.set_page_config(
-        page_title="Timetable Management System",
+        page_title="Timetable Management System with AI Prediction",
         page_icon="📚",
         layout="wide"
     )
     
-    st.title("📚 Timetable Management System")
+    st.title("📚 Intelligent Timetable Management System")
+    st.caption("Powered by AI Prediction & Classroom Management")
     
     if not st.session_state.logged_in:
         st.subheader("Login")
@@ -785,15 +1052,12 @@ def main():
             st.markdown("---")
             st.caption("Demo Credentials:")
             st.caption("Admin: admin / admin123")
-            st.caption("*Note: Admin will be prompted to change password on first login*")
     else:
-        # Check if password change is required
         if st.session_state.show_password_change and not st.session_state.password_changed:
             password_change_form()
         else:
             with st.sidebar:
                 st.write(f"**Logged in as:** {st.session_state.name}")
-                st.write(f"**Username:** {st.session_state.username}")
                 st.write(f"**Role:** {st.session_state.role}")
                 st.markdown("---")
                 
