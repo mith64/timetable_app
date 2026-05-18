@@ -67,6 +67,7 @@ def load_users():
             with open(USER_DB_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         else:
+            # Create default users with teachers from timetable
             default_users = {
                 "admin": {
                     "password": hash_password("admin123"),
@@ -107,6 +108,42 @@ def save_users(users):
     except Exception as e:
         st.error(f"Error saving users: {e}")
         return False
+
+# Auto-create users from teachers in timetable
+def auto_create_teacher_users():
+    """Automatically create user accounts for teachers from timetable"""
+    df = load_timetable()
+    users = load_users()
+    
+    if df is not None and not df.empty:
+        teachers = df['Teacher'].unique()
+        created_count = 0
+        
+        for teacher in teachers:
+            # Get teacher's designation from timetable
+            teacher_data = df[df['Teacher'] == teacher].iloc[0] if len(df[df['Teacher'] == teacher]) > 0 else None
+            designation = teacher_data['Designation'] if teacher_data is not None else "Teacher"
+            
+            # Create username from teacher name (lowercase, no spaces)
+            username = teacher.lower().replace(" ", "_").replace(".", "").replace("dr_", "dr").replace("prof_", "prof")
+            
+            # Only create if user doesn't exist
+            if username not in users and teacher != "New Teacher":
+                users[username] = {
+                    "password": hash_password("teacher123"),  # Default password
+                    "name": teacher,
+                    "designation": designation,
+                    "role": "user",
+                    "first_login": True,
+                    "password_last_changed": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "teacher_name": teacher  # Store original teacher name for matching
+                }
+                created_count += 1
+        
+        if created_count > 0:
+            save_users(users)
+            return created_count
+    return 0
 
 # Load classrooms
 def load_classrooms():
@@ -217,12 +254,14 @@ def load_timetable():
 def create_sample_timetable():
     """Create sample timetable data"""
     sample_data = {
-        'Day': ['Monday', 'Monday', 'Tuesday', 'Tuesday', 'Wednesday', 'Wednesday', 'Thursday', 'Thursday', 'Friday', 'Friday', 'Saturday', 'Saturday'],
-        'Time': ['9:00-10:00', '10:00-11:00', '9:00-10:00', '10:00-11:00', '9:00-10:00', '10:00-11:00', '9:00-10:00', '10:00-11:00', '9:00-10:00', '10:00-11:00', '9:00-10:00', '10:00-11:00'],
-        'Teacher': ['Dr. Smith', 'Prof. Johnson', 'Dr. Smith', 'Prof. Brown', 'Prof. Johnson', 'Dr. Smith', 'Prof. Brown', 'Prof. Johnson', 'Dr. Smith', 'Prof. Brown', 'Dr. Smith', 'Prof. Johnson'],
-        'Subject': ['Mathematics', 'Physics', 'Mathematics', 'Chemistry', 'Physics', 'Mathematics', 'Chemistry', 'Biology', 'Mathematics', 'Physics', 'Mathematics', 'Computer Science'],
-        'Class': ['10A', '10A', '10B', '10B', '10C', '10C', '10A', '10A', '10B', '10B', '10C', '10C'],
-        'Designation': ['Math Teacher', 'Physics Teacher', 'Math Teacher', 'Chemistry Teacher', 'Physics Teacher', 'Math Teacher', 'Chemistry Teacher', 'Biology Teacher', 'Math Teacher', 'Physics Teacher', 'Math Teacher', 'CS Teacher']
+        'Day': ['Monday', 'Monday', 'Monday', 'Monday', 'Monday', 'Monday', 'Monday', 'Monday',
+                'Tuesday', 'Tuesday', 'Tuesday', 'Tuesday', 'Tuesday', 'Tuesday', 'Tuesday', 'Tuesday'],
+        'Time': ['9:00-10:00', '10:00-11:00', '11:00-12:00', '12:00-1:00', '1:00-2:00', '2:00-3:00', '3:00-4:00', '4:00-5:00'] * 2,
+        'Teacher': ['Dr. Smith', 'Prof. Johnson', 'Dr. Smith', 'Prof. Brown', 'Dr. Smith', 'Prof. Johnson', 'Dr. Smith', 'Prof. Brown'] * 2,
+        'Subject': ['Mathematics', 'Physics', 'Mathematics', 'Chemistry', 'Mathematics', 'Physics', 'Mathematics', 'Chemistry'] * 2,
+        'Class': ['10A', '10A', '10B', '10B', '10C', '10C', '10A', '10A'] * 2,
+        'Designation': ['Math Teacher', 'Physics Teacher', 'Math Teacher', 'Chemistry Teacher', 
+                       'Math Teacher', 'Physics Teacher', 'Math Teacher', 'Chemistry Teacher'] * 2
     }
     df = pd.DataFrame(sample_data)
     save_timetable(df)
@@ -243,6 +282,8 @@ def save_timetable(df):
             df.to_excel(TIMETABLE_FILE, index=False, engine='openpyxl')
             st.session_state.timetable_df = df
             st.cache_data.clear()
+            # Auto-create users from updated timetable
+            auto_create_teacher_users()
             return True
         except Exception as e1:
             st.warning(f"Direct save failed: {e1}")
@@ -251,6 +292,7 @@ def save_timetable(df):
                 df.to_excel(TIMETABLE_FILE, index=False, engine='xlsxwriter')
                 st.session_state.timetable_df = df
                 st.cache_data.clear()
+                auto_create_teacher_users()
                 return True
             except Exception as e2:
                 st.warning(f"Alternative engine failed: {e2}")
@@ -272,6 +314,7 @@ def save_timetable(df):
                     
                     st.session_state.timetable_df = df
                     st.cache_data.clear()
+                    auto_create_teacher_users()
                     return True
                 except Exception as e3:
                     st.error(f"All save methods failed. Last error: {e3}")
@@ -280,6 +323,140 @@ def save_timetable(df):
     except Exception as e:
         st.error(f"Unexpected error saving: {e}")
         return False
+
+# ============ ARRANGEMENT SUMMARY TABLE ============
+
+def get_arrangement_summary_table(day=None):
+    """Generate arrangement summary table with rows as absent teachers and columns as periods"""
+    arrangements = load_arrangements()
+    df = load_timetable()
+    
+    if df.empty:
+        return None
+    
+    # Get all periods (time slots)
+    all_times = sorted(df['Time'].unique())
+    # Create period labels (1st period, 2nd period, etc.)
+    period_labels = [f"{i+1}st Period" if i == 0 else f"{i+1}nd Period" if i == 1 else f"{i+1}rd Period" if i == 2 else f"{i+1}th Period" 
+                     for i in range(len(all_times))]
+    
+    # Filter arrangements for specific day if provided
+    summary_data = []
+    
+    # Group arrangements by absent teacher
+    absent_teachers = {}
+    for key, value in arrangements.items():
+        if value.get('status') != 'completed':
+            absent_teacher = value.get('absent_teacher')
+            if absent_teacher not in absent_teachers:
+                absent_teachers[absent_teacher] = {}
+            
+            time_slot = value.get('time')
+            class_name = value.get('class')
+            replacement = value.get('replacement_teacher')
+            
+            absent_teachers[absent_teacher][time_slot] = {
+                'replacement': replacement,
+                'class': class_name,
+                'subject': value.get('subject')
+            }
+    
+    # Create summary rows
+    for absent_teacher, slots in absent_teachers.items():
+        row = {'Absent Teacher': absent_teacher}
+        
+        # Fill periods
+        for i, time_slot in enumerate(all_times):
+            if time_slot in slots:
+                slot_info = slots[time_slot]
+                row[period_labels[i]] = f"{slot_info['replacement']}\n({slot_info['class']})"
+            else:
+                row[period_labels[i]] = "-"
+        
+        summary_data.append(row)
+    
+    if summary_data:
+        return pd.DataFrame(summary_data)
+    return None
+
+def display_arrangement_summary():
+    """Display arrangement summary in tabular format"""
+    st.subheader("📊 Daily Arrangement Summary")
+    
+    df = load_timetable()
+    if df.empty:
+        st.warning("No timetable data available")
+        return
+    
+    # Day selector
+    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    selected_day = st.selectbox("Select Day", days, key="summary_day")
+    
+    # Filter arrangements for selected day
+    arrangements = load_arrangements()
+    day_arrangements = {k: v for k, v in arrangements.items() if v.get('day') == selected_day and v.get('status') != 'completed'}
+    
+    if not day_arrangements:
+        st.info(f"No active arrangements for {selected_day}")
+        return
+    
+    # Get all time periods for the selected day
+    day_times = df[df['Day'] == selected_day]['Time'].unique()
+    day_times = sorted(day_times)
+    
+    # Create period labels
+    period_labels = []
+    for i in range(len(day_times)):
+        if i == 0:
+            period_labels.append(f"{i+1}st Period")
+        elif i == 1:
+            period_labels.append(f"{i+1}nd Period")
+        elif i == 2:
+            period_labels.append(f"{i+1}rd Period")
+        else:
+            period_labels.append(f"{i+1}th Period")
+    
+    # Group by absent teacher
+    absent_teachers_data = {}
+    for key, value in day_arrangements.items():
+        absent = value.get('absent_teacher')
+        time_slot = value.get('time')
+        replacement = value.get('replacement_teacher')
+        class_name = value.get('class')
+        
+        if absent not in absent_teachers_data:
+            absent_teachers_data[absent] = {}
+        
+        absent_teachers_data[absent][time_slot] = {
+            'replacement': replacement,
+            'class': class_name
+        }
+    
+    # Create DataFrame
+    table_data = []
+    for absent, slots in absent_teachers_data.items():
+        row = {'Absent Teacher': absent}
+        for i, time_slot in enumerate(day_times):
+            if time_slot in slots:
+                row[period_labels[i]] = f"{slots[time_slot]['replacement']}\n({slots[time_slot]['class']})"
+            else:
+                row[period_labels[i]] = "—"
+        table_data.append(row)
+    
+    if table_data:
+        summary_df = pd.DataFrame(table_data)
+        st.dataframe(summary_df, use_container_width=True, height=400)
+        
+        # Export option
+        csv = summary_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Summary as CSV",
+            data=csv,
+            file_name=f"arrangement_summary_{selected_day}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info(f"No arrangement data for {selected_day}")
 
 # ============ PREDICTION SYSTEM ============
 
@@ -635,6 +812,11 @@ def arrangement_management():
     if arrangements is None:
         arrangements = {}
     
+    # Display arrangement summary table prominently
+    display_arrangement_summary()
+    
+    st.markdown("---")
+    
     # Check crisis mode
     crisis_mode, absent_count, total_teachers = check_crisis_mode(df, arrangements)
     
@@ -702,6 +884,7 @@ def arrangement_management():
                                 "serial_classes": serial_classes
                             }
                             save_arrangements(arrangements)
+                            st.rerun()
                         else:
                             st.error("❌ No available teachers found")
                     else:
@@ -732,6 +915,7 @@ def arrangement_management():
                                 "crisis_mode": False
                             }
                             save_arrangements(arrangements)
+                            st.rerun()
                         else:
                             st.error("❌ No suitable replacement found")
                 else:
@@ -739,31 +923,34 @@ def arrangement_management():
             except Exception as e:
                 st.error(f"Error in prediction: {e}")
     
-    # Display arrangements
-    st.subheader("2️⃣ Current Arrangements")
+    # Display individual arrangements
+    st.subheader("2️⃣ Individual Arrangements")
     if arrangements and len(arrangements) > 0:
         for key, value in list(arrangements.items()):
-            with st.expander(f"📅 {value.get('day', 'N/A')} - {value.get('time', 'N/A')} - {value.get('class', 'N/A')}"):
-                st.write(f"**Absent Teacher:** {value.get('absent_teacher', 'N/A')}")
-                st.write(f"**Replacement:** {value.get('replacement_teacher', 'N/A')}")
-                st.write(f"**Subject:** {value.get('subject', 'N/A')}")
-                st.write(f"**Status:** {value.get('status', 'N/A')}")
-                if value.get('crisis_mode'):
-                    st.warning("⚠️ Crisis Mode Assignment")
-                if value.get('serial_classes'):
-                    st.write("**Serial Classes:**")
-                    for sc in value['serial_classes']:
-                        st.write(f"  - {sc['time']}: {sc['class']}")
-                
-                if st.button(f"Mark Complete", key=f"complete_{key}"):
-                    value['status'] = 'completed'
-                    save_arrangements(arrangements)
-                    st.rerun()
-                
-                if st.button(f"Delete", key=f"del_{key}"):
-                    del arrangements[key]
-                    save_arrangements(arrangements)
-                    st.rerun()
+            if value.get('status') != 'completed':
+                with st.expander(f"📅 {value.get('day', 'N/A')} - {value.get('time', 'N/A')} - {value.get('class', 'N/A')}"):
+                    st.write(f"**Absent Teacher:** {value.get('absent_teacher', 'N/A')}")
+                    st.write(f"**Replacement:** {value.get('replacement_teacher', 'N/A')}")
+                    st.write(f"**Subject:** {value.get('subject', 'N/A')}")
+                    st.write(f"**Status:** {value.get('status', 'N/A')}")
+                    if value.get('crisis_mode'):
+                        st.warning("⚠️ Crisis Mode Assignment")
+                    if value.get('serial_classes'):
+                        st.write("**Serial Classes:**")
+                        for sc in value['serial_classes']:
+                            st.write(f"  - {sc['time']}: {sc['class']}")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button(f"✓ Mark Complete", key=f"complete_{key}"):
+                            value['status'] = 'completed'
+                            save_arrangements(arrangements)
+                            st.rerun()
+                    with col2:
+                        if st.button(f"🗑️ Delete", key=f"del_{key}"):
+                            del arrangements[key]
+                            save_arrangements(arrangements)
+                            st.rerun()
     else:
         st.info("No pending arrangements")
 
@@ -894,10 +1081,12 @@ def admin_panel():
         st.subheader("Create New User")
         with st.form("create_user_form"):
             new_username = st.text_input("Username")
-            new_password = st.text_input("Password", type="password")
+            new_password = st.text_input("Password", type="password", value="teacher123")
             new_name = st.text_input("Full Name")
             new_designation = st.text_input("Designation")
             new_role = st.selectbox("Role", ["user", "admin"])
+            
+            st.info("💡 Default password for new users: **teacher123**")
             
             if st.form_submit_button("Create User"):
                 if new_username and new_password and new_name and new_designation:
@@ -911,11 +1100,11 @@ def admin_panel():
                                 "name": new_name,
                                 "designation": new_designation,
                                 "role": new_role,
-                                "first_login": False,
+                                "first_login": True,
                                 "password_last_changed": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             }
                             save_users(users)
-                            st.success(f"User {new_username} created successfully!")
+                            st.success(f"User {new_username} created successfully! Default password: {new_password}")
                             st.rerun()
                         else:
                             st.error("Username already exists!")
@@ -925,6 +1114,10 @@ def admin_panel():
     with tab2:
         st.subheader("Manage Users")
         users = load_users()
+        
+        # Show auto-created teacher users info
+        st.info("💡 Teacher accounts are automatically created from timetable data with default password: **teacher123**")
+        
         user_list = [u for u in users.keys() if u != 'admin']
         
         if user_list:
@@ -943,7 +1136,7 @@ def admin_panel():
                             st.rerun()
                     with col2:
                         with st.popover(f"Reset Password for {username}"):
-                            new_pass = st.text_input(f"New password for {username}", type="password", key=f"reset_pass_{username}")
+                            new_pass = st.text_input(f"New password for {username}", type="password", key=f"reset_pass_{username}", value="teacher123")
                             if st.button(f"Confirm Reset", key=f"confirm_reset_{username}"):
                                 if new_pass and len(new_pass) >= 6:
                                     success, message = reset_user_password(username, new_pass)
@@ -967,7 +1160,7 @@ def admin_panel():
                 required_cols = ['Day', 'Time', 'Teacher', 'Subject', 'Class', 'Designation']
                 if all(col in df.columns for col in required_cols):
                     if save_timetable(df):
-                        st.success("Timetable uploaded successfully!")
+                        st.success("Timetable uploaded successfully! Teacher accounts created automatically.")
                         st.rerun()
                 else:
                     st.error(f"Missing columns. Required: {required_cols}")
@@ -993,13 +1186,32 @@ def user_dashboard():
         st.warning("No timetable available. Please contact admin.")
         return
     
+    # Show teacher's timetable based on name
     st.subheader("📅 Your Timetable")
-    user_timetable = df[df['Designation'].str.lower() == st.session_state.designation.lower()]
+    
+    # Match by Teacher name (since user name is the teacher's name)
+    user_timetable = df[df['Teacher'] == st.session_state.name]
+    
+    if user_timetable.empty:
+        # Try matching by designation
+        user_timetable = df[df['Designation'].str.lower() == st.session_state.designation.lower()]
     
     if not user_timetable.empty:
-        st.dataframe(user_timetable[['Day', 'Time', 'Subject', 'Class']], use_container_width=True)
+        # Display timetable in a clean format
+        display_df = user_timetable[['Day', 'Time', 'Subject', 'Class']].sort_values(['Day', 'Time'])
+        st.dataframe(display_df, use_container_width=True)
+        
+        # Summary statistics
+        st.subheader("📊 Your Weekly Summary")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Classes", len(user_timetable))
+        with col2:
+            st.metric("Unique Subjects", len(user_timetable['Subject'].unique()))
+        with col3:
+            st.metric("Unique Classes", len(user_timetable['Class'].unique()))
     else:
-        st.info(f"No timetable entries found")
+        st.info(f"No timetable entries found for {st.session_state.name}")
     
     st.subheader("🔄 Your Arrangement Assignments")
     arrangements = load_arrangements()
@@ -1007,6 +1219,7 @@ def user_dashboard():
     if arrangements and len(arrangements) > 0:
         user_arrangements = []
         for key, value in arrangements.items():
+            # Check if user is the replacement teacher
             if value.get('replacement_teacher') == st.session_state.name:
                 if value.get('status') != 'completed':
                     user_arrangements.append(value)
@@ -1017,10 +1230,13 @@ def user_dashboard():
                     st.write(f"**Class:** {arr.get('class')}")
                     st.write(f"**Subject:** {arr.get('subject')}")
                     st.write(f"**Covering for:** {arr.get('absent_teacher')}")
+                    st.write(f"**Reason:** {arr.get('reason', 'Not specified')}")
                     if arr.get('crisis_mode'):
                         st.warning("⚠️ Crisis Mode - Multiple classes may be assigned")
         else:
-            st.info("No active arrangements")
+            st.info("No active arrangements assigned to you")
+    else:
+        st.info("No arrangements found")
 
 def main():
     st.set_page_config(
@@ -1031,6 +1247,11 @@ def main():
     
     st.title("📚 Intelligent Timetable Management System")
     st.caption("Powered by AI Prediction & Classroom Management")
+    
+    # Auto-create teacher users from timetable on startup
+    created = auto_create_teacher_users()
+    if created > 0 and st.session_state.get('logged_in'):
+        st.success(f"✅ Auto-created {created} teacher accounts with default password: teacher123")
     
     if not st.session_state.logged_in:
         st.subheader("Login")
@@ -1052,12 +1273,14 @@ def main():
             st.markdown("---")
             st.caption("Demo Credentials:")
             st.caption("Admin: admin / admin123")
+            st.caption("Teacher accounts: Use teacher name as username (e.g., dr_smith) with password: teacher123")
     else:
         if st.session_state.show_password_change and not st.session_state.password_changed:
             password_change_form()
         else:
             with st.sidebar:
                 st.write(f"**Logged in as:** {st.session_state.name}")
+                st.write(f"**Username:** {st.session_state.username}")
                 st.write(f"**Role:** {st.session_state.role}")
                 st.markdown("---")
                 
@@ -1069,6 +1292,9 @@ def main():
             
             if st.session_state.role == 'admin':
                 admin_panel()
+                # Also show user dashboard for admin
+                st.markdown("---")
+                st.subheader("Your Dashboard (Admin View)")
                 user_dashboard()
             else:
                 user_dashboard()
